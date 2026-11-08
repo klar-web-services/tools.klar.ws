@@ -1,0 +1,83 @@
+name: Publish to tools.klar.ws
+description: Upload release files and install scripts of a tool to tools.klar.ws.
+
+inputs:
+  tool:
+    description: Tool name; becomes the URL path (tools.klar.ws/<tool>/).
+    required: true
+  version:
+    description: Release version or tag, e.g. v1.2.3. Required when files are given.
+    default: ""
+  files:
+    description: Release files, one path or glob per line. Leave empty for script-only tools.
+    default: ""
+  scripts:
+    description: >
+      Directory whose top-level files are published as tools.klar.ws/<tool>/<name>.
+      Leave empty to generate install.sh, install.ps1 and index.html from the templates.
+    default: ""
+  binary:
+    description: Binary name inside the archives, for the generated installers. Defaults to the tool name.
+    default: ""
+  description:
+    description: One-line description for the generated landing page.
+    default: ""
+  repo-url:
+    description: Source link for the generated landing page.
+    default: ${{ github.server_url }}/${{ github.repository }}
+  latest:
+    description: auto (move latest unless the version is a pre-release), always or never.
+    default: auto
+  access-key-id:
+    description: S3 access key.
+    required: true
+  secret-access-key:
+    description: S3 secret key.
+    required: true
+  bucket:
+    description: Overrides the bucket configured in bin/toolsctl.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Publish
+      shell: bash
+      env:
+        TOOLS_S3_ACCESS_KEY: ${{ inputs.access-key-id }}
+        TOOLS_S3_SECRET_KEY: ${{ inputs.secret-access-key }}
+        INPUT_BUCKET: ${{ inputs.bucket }}
+        INPUT_TOOL: ${{ inputs.tool }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_SCRIPTS: ${{ inputs.scripts }}
+        INPUT_BINARY: ${{ inputs.binary }}
+        INPUT_DESCRIPTION: ${{ inputs.description }}
+        INPUT_REPO_URL: ${{ inputs.repo-url }}
+        INPUT_LATEST: ${{ inputs.latest }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        if [ -n "$INPUT_BUCKET" ]; then export TOOLS_S3_BUCKET="$INPUT_BUCKET"; fi
+
+        args=(publish --tool "$INPUT_TOOL" --latest "$INPUT_LATEST" --repo-url "$INPUT_REPO_URL")
+        if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+        if [ -n "$INPUT_SCRIPTS" ]; then args+=(--scripts "$INPUT_SCRIPTS"); fi
+        if [ -n "$INPUT_BINARY" ]; then args+=(--binary "$INPUT_BINARY"); fi
+        if [ -n "$INPUT_DESCRIPTION" ]; then args+=(--description "$INPUT_DESCRIPTION"); fi
+
+        files=()
+        while IFS= read -r pattern; do
+          pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+          pattern="${pattern%"${pattern##*[![:space:]]}"}"
+          [ -n "$pattern" ] || continue
+          # shellcheck disable=SC2206 # intentional glob expansion
+          matched=($pattern)
+          if [ ${#matched[@]} -eq 0 ]; then
+            echo "::error::'$pattern' matched no files"
+            exit 1
+          fi
+          files+=("${matched[@]}")
+        done <<< "$INPUT_FILES"
+
+        "$GITHUB_ACTION_PATH/../bin/toolsctl" "${args[@]}" -- "${files[@]}"

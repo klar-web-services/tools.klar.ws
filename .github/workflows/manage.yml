@@ -1,0 +1,64 @@
+name: Manage a tool
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: What to do
+        type: choice
+        options: [status, set-latest, retire, purge, unretire]
+        default: status
+      tool:
+        description: Tool name (empty with status lists all tools)
+        type: string
+        default: ""
+      version:
+        description: set-latest only, e.g. 1.2.3
+        type: string
+        default: ""
+      message:
+        description: retire only; shown to users, e.g. why and what to use instead
+        type: string
+        default: ""
+      confirm:
+        description: purge only; type the tool name again
+        type: string
+        default: ""
+
+concurrency:
+  group: manage-${{ inputs.tool }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolsctl ${{ inputs.command }} ${{ inputs.tool }}
+        env:
+          TOOLS_S3_ACCESS_KEY: ${{ secrets.TOOLS_S3_ACCESS_KEY }}
+          TOOLS_S3_SECRET_KEY: ${{ secrets.TOOLS_S3_SECRET_KEY }}
+          COMMAND: ${{ inputs.command }}
+          TOOL: ${{ inputs.tool }}
+          VERSION: ${{ inputs.version }}
+          MESSAGE: ${{ inputs.message }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$TOOL" ]; then args+=(--tool "$TOOL"); fi
+          case "$COMMAND" in
+            set-latest) args+=(--version "$VERSION") ;;
+            retire) args+=(--message "$MESSAGE") ;;
+            purge)
+              if [ "$CONFIRM" != "$TOOL" ]; then
+                echo "::error::confirm must repeat the tool name to purge"
+                exit 1
+              fi
+              args+=(--yes) ;;
+          esac
+          bin/toolsctl "$COMMAND" "${args[@]}"
+          if [ "$COMMAND" != status ]; then bin/toolsctl status ${TOOL:+--tool "$TOOL"}; fi

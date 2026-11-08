@@ -1,0 +1,17 @@
+# Keeps the pinned images (nginx, and RustFS for tests) and GitHub Actions current.
+# Image pins include a digest, so rebuilds of the same nginx tag (e.g. for Alpine
+# security fixes) arrive as pull requests too; CI runs the end-to-end test on each.
+version: 2
+updates:
+  - package-ecosystem: docker-compose
+    directories: ["/", "/test"]
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>@TOOL@ · install</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 3rem 1.5rem; background: #10131a; color: #d7dbe4;
+             font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+      main { max-width: 46rem; margin: 0 auto; }
+      h1 { font-size: 1.4rem; margin: 0 0 .35rem; color: #fff; }
+      p { color: #98a0b0; margin: 0 0 2rem; }
+      h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em;
+           color: #7d8698; margin: 2rem 0 .6rem; font-weight: 600; }
+      pre { background: #171b24; border: 1px solid #252b38; border-radius: 8px;
+            padding: .9rem 1.1rem; overflow-x: auto; margin: 0; }
+      code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9ecbff; }
+      a { color: #7aa2f7; }
+      footer { margin-top: 2.5rem; color: #6b7385; font-size: .85rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>@TOOL@</h1>
+      <p>@DESCRIPTION@</p>
+      <h2>macOS · Linux</h2>
+      <pre><code>curl -fsSL @TOOL_URL@/install.sh | sh</code></pre>
+      <h2>Windows</h2>
+      <pre><code>irm @TOOL_URL@/install.ps1 | iex</code></pre>
+      <footer>
+        Both scripts verify release checksums and install to a user-local directory.
+        @REPO_LINK@
+      </footer>
+    </main>
+  </body>
+</html>

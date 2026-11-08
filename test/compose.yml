@@ -1,0 +1,27 @@
+# Local stand-in for production: RustFS plays the Hetzner bucket, nginx runs the
+# real proxy config. Used by test/e2e.sh.
+name: tools-klar-ws-test
+services:
+  s3:
+    image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
+    environment:
+      RUSTFS_ACCESS_KEY: e2e-access
+      RUSTFS_SECRET_KEY: e2e-secret-key
+    ports:
+      - "127.0.0.1:${E2E_S3_PORT:-39000}:9000"
+
+  proxy:
+    image: nginx:1.30.6-alpine-slim@sha256:f65ed258206d1eb6c4eb6141111715a2cf94ac0a4ec9675fc2da186f7aadb163
+    environment:
+      S3_ORIGIN: http://s3:9000/tools-test
+      S3_CACHE_VALID: 1s
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+      NGINX_ENVSUBST_FILTER: "^(S3_|NGINX_LOCAL_RESOLVERS$$)"
+    volumes:
+      - ../nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    tmpfs:
+      - /var/cache/nginx/tools:size=64m
+    ports:
+      - "127.0.0.1:${E2E_PROXY_PORT:-38080}:80"
+    depends_on:
+      - s3

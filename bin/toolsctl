@@ -1,0 +1,484 @@
+#!/bin/sh
+# toolsctl: publish and manage tool distributions on tools.klar.ws.
+#
+# Bucket layout (the nginx proxy serves the bucket root at https://tools.klar.ws/):
+#   index.html                      generated list of active tools
+#   <tool>/install.sh, install.ps1  entry points (any top-level file is served as-is)
+#   <tool>/index.html               landing page
+#   <tool>/latest                   current stable version, e.g. "1.2.3"
+#   <tool>/v<version>/...           release files; never overwritten
+#   <tool>/v<version>/checksums.txt uploaded last, marks a version as complete
+#   <tool>/RETIRED                  tombstone: blocks publishing
+set -eu
+
+TOOLS_HOME=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+TEMPLATES="$TOOLS_HOME/templates"
+
+# ---- configuration (environment overrides) ---------------------------------
+# TODO: set the bucket name here once the Hetzner bucket exists.
+: "${TOOLS_S3_BUCKET:=}"
+: "${TOOLS_S3_ENDPOINT:=https://fsn1.your-objectstorage.com}"
+: "${TOOLS_S3_REGION:=fsn1}"
+: "${TOOLS_PUBLIC_URL:=https://tools.klar.ws}"
+
+if [ -n "${TOOLS_S3_ACCESS_KEY:-}" ]; then export AWS_ACCESS_KEY_ID="$TOOLS_S3_ACCESS_KEY"; fi
+if [ -n "${TOOLS_S3_SECRET_KEY:-}" ]; then export AWS_SECRET_ACCESS_KEY="$TOOLS_S3_SECRET_KEY"; fi
+export AWS_DEFAULT_REGION="$TOOLS_S3_REGION"
+export AWS_PAGER=""
+# Newer AWS CLIs send CRC checksums by default, which non-AWS S3 servers often reject.
+export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
+export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
+
+CACHE_MUTABLE="public, max-age=300"
+CACHE_IMMUTABLE="public, max-age=31536000, immutable"
+TEXT="text/plain; charset=utf-8"
+HTML="text/html; charset=utf-8"
+NL='
+'
+
+usage() {
+	cat <<'EOF'
+Usage: toolsctl <command> [options] [files...]
+
+Commands:
+  publish     --tool T [--version V FILES...] [--scripts DIR]
+              [--binary NAME] [--description TEXT] [--repo-url URL]
+              [--latest auto|always|never]
+                Upload release FILES to T/vV/ and the install scripts to T/.
+                Without --scripts, installers are generated from templates/.
+                --latest auto (default) moves T/latest unless V is a pre-release.
+  set-latest  --tool T --version V     Point T/latest at an already published version.
+  retire      --tool T --message TEXT  Replace scripts with notices, remove T/latest,
+                                       block further publishing.
+  purge       --tool T --yes           Delete all release files of a retired tool.
+  unretire    --tool T                 Remove the tombstone; the next publish restores T.
+  status      [--tool T]               Show tools, their state and versions.
+  apply-policy                         Allow anonymous reads of objects (no listing).
+
+Environment:
+  TOOLS_S3_ACCESS_KEY, TOOLS_S3_SECRET_KEY   credentials (or the usual AWS_* variables)
+  TOOLS_S3_BUCKET, TOOLS_S3_ENDPOINT, TOOLS_S3_REGION, TOOLS_PUBLIC_URL
+EOF
+}
+
+die() { printf 'toolsctl: %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*" >&2; }
+
+# ---- validation --------------------------------------------------------------
+matches() { printf '%s' "$1" | grep -Eq "$2"; }
+single_line() { case $1 in *"$NL"*) die "$2 must be a single line" ;; esac; }
+valid_tool() { matches "$1" '^[a-z0-9][a-z0-9-]{0,62}$'; }
+valid_version() { matches "$1" '^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$'; }
+valid_name() { matches "$1" '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; }
+
+require_tool() {
+	[ -n "$tool" ] || die "--tool is required"
+	valid_tool "$tool" || die "invalid tool name '$tool' (lowercase letters, digits, dashes)"
+}
+require_version() {
+	[ -n "$version" ] || die "--version is required"
+	version=${version#v}
+	valid_version "$version" || die "invalid version '$version'"
+}
+
+TOOLS_PUBLIC_URL=${TOOLS_PUBLIC_URL%/}
+matches "$TOOLS_PUBLIC_URL" '^https?://[A-Za-z0-9.:-]+(/[A-Za-z0-9._~/-]*)?$' ||
+	die "invalid TOOLS_PUBLIC_URL '$TOOLS_PUBLIC_URL'"
+
+# ---- S3 helpers ----------------------------------------------------------------
+s3api() { aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api "$@"; }
+
+need_bucket() { [ -n "$TOOLS_S3_BUCKET" ] || die "TOOLS_S3_BUCKET is not set"; }
+
+# exists KEY: 0 if present, 1 if absent; any other error is fatal, so a network
+# blip can never be mistaken for "not retired" or "version not published".
+exists() {
+	if err=$(s3api head-object --bucket "$TOOLS_S3_BUCKET" --key "$1" 2>&1 >/dev/null); then
+		return 0
+	fi
+	case $err in *"(404)"* | *"Not Found"* | *NoSuchKey*) return 1 ;; esac
+	die "checking $1 failed: $err"
+}
+
+put() { # put FILE KEY CONTENT_TYPE CACHE_CONTROL
+	s3api put-object --bucket "$TOOLS_S3_BUCKET" --key "$2" --body "$1" \
+		--content-type "$3" --cache-control "$4" >/dev/null
+	log "  put    $2"
+}
+
+del() {
+	s3api delete-object --bucket "$TOOLS_S3_BUCKET" --key "$1" >/dev/null
+	log "  delete $1"
+}
+
+read_key() { # read_key KEY: print the object's content
+	s3api get-object --bucket "$TOOLS_S3_BUCKET" --key "$1" "$work/read.tmp" >/dev/null
+	cat "$work/read.tmp"
+}
+
+list_keys() { # list_keys PREFIX: one key per line
+	s3api list-objects-v2 --bucket "$TOOLS_S3_BUCKET" --prefix "$1" \
+		--query 'Contents[].Key' --output text | tr '\t' '\n' | grep -v -e '^None$' -e '^$' || true
+}
+
+list_tools() {
+	s3api list-objects-v2 --bucket "$TOOLS_S3_BUCKET" --delimiter / \
+		--query 'CommonPrefixes[].Prefix' --output text | tr '\t' '\n' | sed -n 's|/$||p'
+}
+
+# ---- misc helpers --------------------------------------------------------------
+content_type() {
+	case $1 in
+	*.html) echo "$HTML" ;;
+	*.sh | *.ps1 | *.txt | *.md | *.sig | *.asc | *.minisig | *.pem | latest | RETIRED) echo "$TEXT" ;;
+	*.json) echo "application/json" ;;
+	*.tar.gz | *.tgz) echo "application/gzip" ;;
+	*.tar.xz) echo "application/x-xz" ;;
+	*.zip) echo "application/zip" ;;
+	*) echo "application/octet-stream" ;;
+	esac
+}
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+html_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
+
+env_prefix() { # bbs -> BBS, my-tool -> MY_TOOL
+	p=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
+	case $p in [0-9]*) p="TOOL_$p" ;; esac
+	printf '%s' "$p"
+}
+
+# render TEMPLATE OUT [BLOCK_FILE]: fill @PLACEHOLDERS@; a line that is exactly
+# @BLOCK@ is replaced by BLOCK_FILE verbatim (after substitution, so it is never
+# interpreted).
+render() {
+	sed -e "s|@TOOL@|$tool|g" \
+		-e "s|@BIN@|${binary:-$tool}|g" \
+		-e "s|@ENV@|$(env_prefix "$tool")|g" \
+		-e "s|@TOOL_URL@|$(sed_escape "$TOOLS_PUBLIC_URL/$tool")|g" \
+		-e "s|@PUBLIC_URL@|$(sed_escape "$TOOLS_PUBLIC_URL")|g" \
+		-e "s|@DESCRIPTION@|$(sed_escape "${description_html:-}")|g" \
+		-e "s|@REPO_LINK@|$(sed_escape "${repo_link:-}")|g" \
+		-e "s|@DATE@|$(date -u +%Y-%m-%d)|g" \
+		"$1" |
+		awk -v f="${3:-/dev/null}" '$0 == "@BLOCK@" { while ((getline line < f) > 0) print line; next } { print }' >"$2"
+}
+
+refuse_if_retired() {
+	if exists "$tool/RETIRED"; then
+		die "$tool is retired; run 'toolsctl unretire --tool $tool' first"
+	fi
+}
+
+write_latest() {
+	printf '%s\n' "$1" >"$work/latest"
+	put "$work/latest" "$tool/latest" "$TEXT" "$CACHE_MUTABLE"
+}
+
+# Rebuild the root index from the bucket. Last writer wins if two runs overlap;
+# the next run corrects it.
+refresh_root_index() {
+	: >"$work/rows.html"
+	list_tools >"$work/tools.txt"
+	while IFS= read -r t; do
+		valid_tool "$t" || continue
+		if exists "$t/RETIRED"; then continue; fi
+		v=
+		if exists "$t/latest"; then
+			v=$(read_key "$t/latest" | tr -d '[:space:]')
+			valid_version "$v" || v=
+		fi
+		printf '      <li><a href="/%s/">%s</a>%s</li>\n' "$t" "$t" "${v:+ <span>$v</span>}" >>"$work/rows.html"
+	done <"$work/tools.txt"
+	[ -s "$work/rows.html" ] || echo '      <li>No tools published yet.</li>' >"$work/rows.html"
+	render "$TEMPLATES/root-index.html" "$work/root-index.html" "$work/rows.html"
+	put "$work/root-index.html" index.html "$HTML" "$CACHE_MUTABLE"
+}
+
+# ---- commands -------------------------------------------------------------------
+cmd_publish() {
+	need_bucket
+	require_tool
+	case $latest in auto | always | never) ;; *) die "--latest must be auto, always or never" ;; esac
+	[ $# -gt 0 ] || [ -n "$scripts" ] || die "nothing to publish: pass release files and/or --scripts"
+	[ $# -gt 0 ] || [ -z "$version" ] || die "--version given but no release files"
+	[ $# -eq 0 ] || require_version
+	[ -z "$scripts" ] || [ -d "$scripts" ] || die "--scripts: '$scripts' is not a directory"
+	[ -z "$binary" ] || valid_name "$binary" || die "invalid --binary '$binary'"
+	single_line "$description" --description
+	if [ -n "$repo_url" ]; then
+		matches "$repo_url" '^https?://[^[:space:]"<>]+$' || die "invalid --repo-url '$repo_url'"
+	fi
+
+	refuse_if_retired
+
+	if [ $# -gt 0 ]; then
+		publish_release "$@"
+	fi
+
+	refuse_if_retired # retire may have run meanwhile
+	log "Publishing scripts for $tool"
+	if [ -n "$scripts" ]; then
+		publish_scripts_dir
+	else
+		publish_generated_scripts
+	fi
+
+	if [ $# -gt 0 ]; then
+		case $latest in
+		always) write_latest "$version" ;;
+		auto) case $version in *-*) log "  $version is a pre-release; latest unchanged" ;; *) write_latest "$version" ;; esac ;;
+		never) log "  latest unchanged (--latest never)" ;;
+		esac
+	fi
+
+	refresh_root_index
+	log "Done: $TOOLS_PUBLIC_URL/$tool/"
+}
+
+publish_release() {
+	log "Publishing $tool $version"
+	: >"$work/assets"
+	provided_sums=
+	for f in "$@"; do
+		[ -f "$f" ] || die "not a file: $f"
+		name=${f##*/}
+		valid_name "$name" || die "unsupported file name '$name'"
+		if [ "$name" = checksums.txt ]; then
+			provided_sums=$f
+			continue
+		fi
+		if grep -qxF "$name" "$work/assets.names" 2>/dev/null; then die "duplicate file name '$name'"; fi
+		echo "$name" >>"$work/assets.names"
+		printf '%s\n' "$f" >>"$work/assets"
+	done
+	[ -s "$work/assets" ] || die "no release files besides checksums.txt"
+
+	while IFS= read -r f; do
+		printf '%s  %s\n' "$(sha256 "$f")" "${f##*/}"
+	done <"$work/assets" | sort -k2 >"$work/checksums.txt"
+
+	if [ -n "$provided_sums" ]; then
+		# Keep the project's checksums.txt (it may match a GitHub release byte for
+		# byte), but only if it vouches for every file we upload.
+		while read -r hash name; do
+			grep -qxF -e "$hash  $name" -e "$hash *$name" "$provided_sums" ||
+				die "checksums.txt has no matching entry for $name"
+		done <"$work/checksums.txt"
+		cp "$provided_sums" "$work/checksums.txt"
+	fi
+
+	if [ -z "$scripts" ] && ! grep -Eq "^$tool-[A-Za-z0-9_]+-.+\.(tar\.gz|zip)$" "$work/assets.names"; then
+		log "  warning: no file is named $tool-<target>.tar.gz/.zip; the generated installers will not find a build"
+	fi
+
+	prefix="$tool/v$version"
+	if exists "$prefix/checksums.txt"; then
+		read_key "$prefix/checksums.txt" >"$work/remote-checksums.txt"
+		if cmp -s "$work/remote-checksums.txt" "$work/checksums.txt"; then
+			log "  $version is already published with identical files; skipping upload"
+			return 0
+		fi
+		die "$tool $version is already published with different files; versions are immutable"
+	fi
+
+	while IFS= read -r f; do
+		name=${f##*/}
+		put "$f" "$prefix/$name" "$(content_type "$name")" "$CACHE_IMMUTABLE"
+	done <"$work/assets"
+	put "$work/checksums.txt" "$prefix/checksums.txt" "$TEXT" "$CACHE_IMMUTABLE"
+}
+
+publish_scripts_dir() {
+	count=0
+	for f in "$scripts"/*; do
+		[ -f "$f" ] || continue
+		name=${f##*/}
+		valid_name "$name" || die "unsupported script name '$name'"
+		case $name in latest | RETIRED) die "'$name' is reserved" ;; esac
+		put "$f" "$tool/$name" "$(content_type "$name")" "$CACHE_MUTABLE"
+		count=$((count + 1))
+	done
+	[ "$count" -gt 0 ] || die "--scripts: no files in '$scripts'"
+}
+
+publish_generated_scripts() {
+	description_html=$(printf '%s' "${description:-}" | html_escape)
+	repo_link=
+	if [ -n "$repo_url" ]; then
+		u=$(printf '%s' "$repo_url" | html_escape)
+		repo_link="Source and releases: <a href=\"$u\">$u</a>"
+	fi
+	for t in install.sh install.ps1 index.html; do
+		render "$TEMPLATES/$t" "$work/$t"
+		put "$work/$t" "$tool/$t" "$(content_type "$t")" "$CACHE_MUTABLE"
+	done
+}
+
+cmd_set_latest() {
+	need_bucket
+	require_tool
+	require_version
+	refuse_if_retired
+	exists "$tool/v$version/checksums.txt" || die "$tool $version is not published"
+	write_latest "$version"
+	refresh_root_index
+}
+
+cmd_retire() {
+	need_bucket
+	require_tool
+	[ -n "$message" ] || die "--message is required: tell users why and where to go instead"
+	printf '%s\n' "$message" >"$work/message"
+	if grep -qx 'TOOLS_KLAR_WS_EOF' "$work/message" || grep -q "^'@" "$work/message"; then
+		die "--message must not contain a line 'TOOLS_KLAR_WS_EOF' or a line starting with '@"
+	fi
+	list_keys "$tool/" >"$work/keys"
+	[ -s "$work/keys" ] || die "unknown tool '$tool'"
+
+	log "Retiring $tool"
+	# Tombstone first, so a concurrent publish stops as early as possible.
+	{
+		printf 'Retired %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		cat "$work/message"
+	} >"$work/RETIRED"
+	put "$work/RETIRED" "$tool/RETIRED" "$TEXT" "no-store"
+
+	html_escape <"$work/message" >"$work/message.html"
+	render "$TEMPLATES/retired.sh" "$work/retired.sh" "$work/message"
+	render "$TEMPLATES/retired.ps1" "$work/retired.ps1" "$work/message"
+	render "$TEMPLATES/retired.html" "$work/retired.html" "$work/message.html"
+
+	# Every top-level script becomes a notice; other top-level files go away.
+	{
+		sed -n "s|^$tool/\([^/]*\)$|\1|p" "$work/keys"
+		printf '%s\n' install.sh install.ps1 index.html
+	} | sort -u >"$work/top"
+	while IFS= read -r name; do
+		case $name in
+		RETIRED) ;;
+		latest) del "$tool/latest" ;;
+		*.sh) put "$work/retired.sh" "$tool/$name" "$TEXT" "$CACHE_MUTABLE" ;;
+		*.ps1) put "$work/retired.ps1" "$tool/$name" "$TEXT" "$CACHE_MUTABLE" ;;
+		index.html) put "$work/retired.html" "$tool/$name" "$HTML" "$CACHE_MUTABLE" ;;
+		*) del "$tool/$name" ;;
+		esac
+	done <"$work/top"
+
+	refresh_root_index
+	log "Done. Release files are still downloadable; run 'toolsctl purge --tool $tool --yes' to delete them."
+}
+
+cmd_purge() {
+	need_bucket
+	require_tool
+	exists "$tool/RETIRED" || die "$tool is not retired; retire it first"
+	list_keys "$tool/v" | grep "^$tool/v[^/]*/" >"$work/purge" || true
+	n=$(wc -l <"$work/purge" | tr -d ' ')
+	[ "$n" -gt 0 ] || { log "Nothing to purge for $tool"; return 0; }
+	if [ -z "$yes" ]; then
+		cat "$work/purge" >&2
+		die "would delete $n objects; re-run with --yes"
+	fi
+	log "Purging $n objects of $tool"
+	while IFS= read -r key; do del "$key"; done <"$work/purge"
+	log "Done. If the proxy caches, restart it to drop cached copies immediately."
+}
+
+cmd_unretire() {
+	need_bucket
+	require_tool
+	exists "$tool/RETIRED" || die "$tool is not retired"
+	del "$tool/RETIRED"
+	refresh_root_index
+	log "Done. Install scripts are still notices until the next publish."
+}
+
+cmd_status() {
+	need_bucket
+	if [ -n "$tool" ]; then
+		require_tool
+		status_one "$tool" long
+	else
+		list_tools >"$work/tools.txt"
+		[ -s "$work/tools.txt" ] || { echo "No tools published."; return 0; }
+		while IFS= read -r t; do valid_tool "$t" && status_one "$t" short; done <"$work/tools.txt"
+	fi
+}
+
+status_one() {
+	t=$1
+	list_keys "$t/" >"$work/status-keys"
+	versions=$(sed -n "s|^$t/v\([^/]*\)/checksums.txt$|\1|p" "$work/status-keys" | sort -V | tr '\n' ' ')
+	if grep -qx "$t/RETIRED" "$work/status-keys"; then
+		state="retired $(read_key "$t/RETIRED" | sed -n '1s/^Retired //p')"
+	elif grep -qx "$t/latest" "$work/status-keys"; then
+		state="active, latest $(read_key "$t/latest" | tr -d '[:space:]')"
+	elif [ -n "$versions" ]; then
+		state="active, no latest"
+	else
+		state="active, scripts only"
+	fi
+	printf '%-24s %s\n' "$t" "$state"
+	if [ "$2" = long ]; then
+		printf '  versions: %s\n' "${versions:-none}"
+		printf '  files:   '
+		sed -n "s|^$t/\([^/]*\)$| \1|p" "$work/status-keys" | tr -d '\n'
+		echo
+	fi
+}
+
+cmd_apply_policy() {
+	need_bucket
+	sed "s|@BUCKET@|$TOOLS_S3_BUCKET|g" "$TOOLS_HOME/policy/public-read.json" >"$work/policy.json"
+	s3api put-bucket-policy --bucket "$TOOLS_S3_BUCKET" --policy "file://$work/policy.json"
+	log "Applied anonymous read policy to $TOOLS_S3_BUCKET"
+}
+
+# ---- main -------------------------------------------------------------------------
+command=${1:-}
+[ $# -eq 0 ] || shift
+tool='' version='' scripts='' binary='' description='' repo_url='' latest=auto message='' yes=''
+need_value() { [ "$1" -ge 2 ] || die "$2 needs a value"; }
+while [ $# -gt 0 ]; do
+	case $1 in
+	--tool) need_value $# "$1"; tool=$2; shift 2 ;;
+	--version) need_value $# "$1"; version=$2; shift 2 ;;
+	--scripts) need_value $# "$1"; scripts=${2%/}; shift 2 ;;
+	--binary) need_value $# "$1"; binary=$2; shift 2 ;;
+	--description) need_value $# "$1"; description=$2; shift 2 ;;
+	--repo-url) need_value $# "$1"; repo_url=$2; shift 2 ;;
+	--latest) need_value $# "$1"; latest=$2; shift 2 ;;
+	--message) need_value $# "$1"; message=$2; shift 2 ;;
+	--yes) yes=1; shift ;;
+	-h | --help) usage; exit 0 ;;
+	--) shift; break ;;
+	-*) die "unknown option: $1" ;;
+	*) break ;;
+	esac
+done
+
+if [ "$command" != publish ] && [ $# -gt 0 ]; then die "unexpected argument: $1"; fi
+command -v aws >/dev/null 2>&1 || die "the AWS CLI (aws) is required"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+case $command in
+publish) cmd_publish "$@" ;;
+set-latest) cmd_set_latest ;;
+retire) cmd_retire ;;
+purge) cmd_purge ;;
+unretire) cmd_unretire ;;
+status) cmd_status ;;
+apply-policy) cmd_apply_policy ;;
+'' | help) usage ;;
+*) die "unknown command: $command (see 'toolsctl help')" ;;
+esac
