@@ -15,11 +15,15 @@ services:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     tmpfs:
       - /var/cache/nginx/tools:size=256m
+    # Traefik only routes to a container once it is healthy, so check early
+    # after start (start_interval) to keep redeploys to a few seconds.
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
+      start_interval: 2s
     networks:
       - dokploy-network
 
