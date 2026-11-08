@@ -112,6 +112,8 @@ root=$(curl -fsS "$PROXY/")
 expect_has "$root" '<a href="/demo/">demo</a> <span>0.1.0</span>' "root index lists demo"
 expect_eq "$(status_code "$PROXY/demo/nope")" 404 "missing file is 404 (bucket says 403)"
 expect_eq "$(status_code "$PROXY/nope/")" 404 "unknown tool is 404"
+expect_lacks "$(curl -s -D - "$PROXY/demo/nope")" "$TOOLS_S3_BUCKET" "a 404 does not reveal the bucket"
+expect_lacks "$(curl -s -D - "$PROXY/demo/install.sh")" "$TOOLS_S3_BUCKET" "normal responses do not reveal the bucket"
 expect_eq "$(status_code -X POST "$PROXY/demo/install.sh")" 405 "writes are rejected"
 expect_lacks "$(curl -s "$PROXY/?list-type=2")" "ListBucketResult" "query strings never reach the bucket"
 
@@ -170,6 +172,9 @@ settle
 resp=$(curl -s -D - -o /dev/null "$f" | tr -d '\r')
 expect_has "$resp" "HTTP/1.1 200" "cached file still downloads while the bucket is down"
 expect_has "$resp" "X-Cache: STALE" "... served as stale"
+resp=$(curl -s -D - "$PROXY/demo/v0.2.0/demo-aarch64-apple-darwin.tar.gz" | tr -d '\r')
+expect_has "$resp" "HTTP/1.1 503" "uncached file during the outage is a plain 503"
+expect_lacks "$resp" "$TOOLS_S3_BUCKET" "... that does not reveal the bucket"
 "${COMPOSE[@]}" start s3 >/dev/null 2>&1
 for _ in $(seq 30); do aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api head-bucket --bucket tools-test >/dev/null 2>&1 && break; sleep 1; done
 "${COMPOSE[@]}" restart proxy >/dev/null 2>&1

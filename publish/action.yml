@@ -28,15 +28,15 @@ inputs:
   latest:
     description: auto (move latest unless the version is a pre-release), always or never.
     default: auto
+  bucket:
+    description: Bucket name; pass secrets.TOOLS_S3_BUCKET.
+    required: true
   access-key-id:
-    description: S3 access key.
+    description: S3 access key; pass secrets.TOOLS_S3_ACCESS_KEY.
     required: true
   secret-access-key:
-    description: S3 secret key.
+    description: S3 secret key; pass secrets.TOOLS_S3_SECRET_KEY.
     required: true
-  bucket:
-    description: Overrides the bucket configured in bin/toolsctl.
-    default: ""
 
 runs:
   using: composite
@@ -44,9 +44,9 @@ runs:
     - name: Publish
       shell: bash
       env:
+        TOOLS_S3_BUCKET: ${{ inputs.bucket }}
         TOOLS_S3_ACCESS_KEY: ${{ inputs.access-key-id }}
         TOOLS_S3_SECRET_KEY: ${{ inputs.secret-access-key }}
-        INPUT_BUCKET: ${{ inputs.bucket }}
         INPUT_TOOL: ${{ inputs.tool }}
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_FILES: ${{ inputs.files }}
@@ -58,7 +58,6 @@ runs:
       run: |
         set -euo pipefail
         shopt -s nullglob
-        if [ -n "$INPUT_BUCKET" ]; then export TOOLS_S3_BUCKET="$INPUT_BUCKET"; fi
 
         args=(publish --tool "$INPUT_TOOL" --latest "$INPUT_LATEST" --repo-url "$INPUT_REPO_URL")
         if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi

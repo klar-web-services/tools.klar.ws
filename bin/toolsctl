@@ -15,7 +15,8 @@ TOOLS_HOME=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TEMPLATES="$TOOLS_HOME/templates"
 
 # ---- configuration (environment overrides) ---------------------------------
-# TODO: set the bucket name here once the Hetzner bucket exists.
+# The bucket name is deliberately not in this public repository: CI passes the
+# org secret TOOLS_S3_BUCKET, which GitHub also masks in the (public) logs.
 : "${TOOLS_S3_BUCKET:=}"
 : "${TOOLS_S3_ENDPOINT:=https://fsn1.your-objectstorage.com}"
 : "${TOOLS_S3_REGION:=fsn1}"
@@ -88,7 +89,10 @@ matches "$TOOLS_PUBLIC_URL" '^https?://[A-Za-z0-9.:-]+(/[A-Za-z0-9._~/-]*)?$' ||
 # ---- S3 helpers ----------------------------------------------------------------
 s3api() { aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api "$@"; }
 
-need_bucket() { [ -n "$TOOLS_S3_BUCKET" ] || die "TOOLS_S3_BUCKET is not set"; }
+need_bucket() {
+	[ -n "$TOOLS_S3_BUCKET" ] || die "TOOLS_S3_BUCKET is not set (in CI: secrets.TOOLS_S3_BUCKET)"
+	matches "$TOOLS_S3_BUCKET" '^[a-z0-9][a-z0-9.-]{1,62}$' || die "TOOLS_S3_BUCKET is not a valid bucket name"
+}
 
 # exists KEY: 0 if present, 1 if absent; any other error is fatal, so a network
 # blip can never be mistaken for "not retired" or "version not published".
@@ -440,7 +444,7 @@ cmd_apply_policy() {
 	need_bucket
 	sed "s|@BUCKET@|$TOOLS_S3_BUCKET|g" "$TOOLS_HOME/policy/public-read.json" >"$work/policy.json"
 	s3api put-bucket-policy --bucket "$TOOLS_S3_BUCKET" --policy "file://$work/policy.json"
-	log "Applied anonymous read policy to $TOOLS_S3_BUCKET"
+	log "Applied the anonymous read policy (objects only, no listing)"
 }
 
 # ---- main -------------------------------------------------------------------------

@@ -46,11 +46,17 @@ There is no registration. The first publish creates `tools.klar.ws/<tool>/`.
        version: ${{ github.ref_name }}
        files: dist/*
        description: One line about mytool.
+       bucket: ${{ secrets.TOOLS_S3_BUCKET }}
        access-key-id: ${{ secrets.TOOLS_S3_ACCESS_KEY }}
        secret-access-key: ${{ secrets.TOOLS_S3_SECRET_KEY }}
    ```
 
-3. Tag a release.
+3. Give the repository access to the three `TOOLS_S3_*` org secrets
+   (org settings → Secrets and variables → Actions → each secret → Repository access).
+4. Tag a release.
+
+A tool that already has GitHub releases can be copied over once with the `import`
+command (see [Managing tools](#managing-tools)).
 
 Without `scripts:`, the action generates `install.sh`, `install.ps1` and `index.html`
 from [`templates/`](templates/). They verify checksums, install to `~/.local/bin` or
@@ -73,7 +79,7 @@ publishes every top-level file of that directory as `/<tool>/<name>`. A script-o
 | `description` | | Landing page text |
 | `repo-url` | this repository | Landing page source link |
 | `latest` | `auto` | `auto` moves `latest` unless the version has a `-` (pre-release); `always`; `never` |
-| `access-key-id`, `secret-access-key` | required | Org secrets `TOOLS_S3_ACCESS_KEY` / `TOOLS_S3_SECRET_KEY` |
+| `bucket`, `access-key-id`, `secret-access-key` | required | Org secrets `TOOLS_S3_BUCKET`, `TOOLS_S3_ACCESS_KEY`, `TOOLS_S3_SECRET_KEY` |
 
 ### Publishing rules
 
@@ -87,16 +93,18 @@ publishes every top-level file of that directory as `/<tool>/<name>`. A script-o
 ## Managing tools
 
 Use **Actions → Manage a tool → Run workflow** in this repository, or run
-`bin/toolsctl` locally with `TOOLS_S3_ACCESS_KEY` and `TOOLS_S3_SECRET_KEY` set
-(needs the AWS CLI).
+`bin/toolsctl` locally with `TOOLS_S3_BUCKET`, `TOOLS_S3_ACCESS_KEY` and
+`TOOLS_S3_SECRET_KEY` set (needs the AWS CLI).
 
 | Command | Effect |
 |---|---|
 | `status [--tool T]` | Tools, state, versions |
+| `import` (workflow only: tool, repo, version) | Copy an existing GitHub release into the bucket, with generated installers |
 | `set-latest --tool T --version V` | Roll `latest` back or forward to a published version |
 | `retire --tool T --message TEXT` | Retire a tool (below) |
 | `purge --tool T --yes` | Delete all release files of a retired tool |
 | `unretire --tool T` | Allow publishing again; the next publish restores the scripts |
+| `apply-policy` | Allow anonymous downloads of objects (no listing); run once per bucket |
 
 ### Retiring a tool
 
@@ -129,21 +137,27 @@ empties its cache immediately.
 
 - forwards only `GET`/`HEAD`, without query strings or client credentials;
 - serves `/<tool>/` as `index.html` and maps the bucket's 403 for missing keys to 404;
+- replaces every error from the bucket with a plain 404 or 503 and hides S3 headers,
+  so responses never reveal the bucket name;
 - sets cache headers by path (table above);
 - keeps a small cache on a tmpfs: objects are re-checked after `S3_CACHE_VALID` (1m),
   and served stale for up to 7 days if the bucket is down (after a 5 s connect timeout).
 
 ## One-time setup
 
-1. **Hetzner:** create a dedicated Cloud project (S3 keys can access every bucket in
-   their project), a bucket in `fsn1` (same location as the Dokploy host) and an S3
-   key pair. Set the bucket name in [`bin/toolsctl`](bin/toolsctl) (`TOOLS_S3_BUCKET`).
-2. **Public read:** `bin/toolsctl apply-policy` allows anonymous `GetObject` only (no
-   listing). Check: an object URL loads, the bucket URL returns `AccessDenied`.
-3. **GitHub:** org secrets `TOOLS_S3_ACCESS_KEY` and `TOOLS_S3_SECRET_KEY`. On the free
-   plan, private repositories can't read org secrets; set them per repository there.
-   Tag this repository `v1` so `publish@v1` resolves.
-4. **Dokploy:** point the `tools` compose service at this repository, set
+The bucket name is kept out of this repository: it lives in the org secret
+`TOOLS_S3_BUCKET` (masked in the public Actions logs) and in Dokploy's environment.
+
+1. **Hetzner:** a private bucket in Falkenstein (`fsn1`, same location as the Dokploy
+   host) and an S3 key pair. S3 keys can reach every bucket in their Hetzner project,
+   so keep any other bucket (backups, for example) in a different project.
+2. **GitHub:** org secrets `TOOLS_S3_BUCKET`, `TOOLS_S3_ACCESS_KEY` and
+   `TOOLS_S3_SECRET_KEY`, with repository access for this repository and each tool
+   repository. On the Free plan, org secrets reach public repositories only.
+3. **Public read:** run the `apply-policy` command once. It allows anonymous
+   `GetObject` only. Check: an object URL loads, the bucket URL returns `AccessDenied`.
+4. Tag this repository `v1` so `publish@v1` resolves.
+5. **Dokploy:** point the `tools` compose service at this repository, set
    `S3_ORIGIN=https://<bucket>.fsn1.your-objectstorage.com` in its environment, and
    route the domain `tools.klar.ws`, path `/`, to service `proxy`, port 80.
 

@@ -45,6 +45,7 @@ server {
     proxy_hide_header x-amz-version-id;
     proxy_hide_header x-amz-server-side-encryption;
     proxy_hide_header x-rgw-object-type;
+    proxy_hide_header x-amz-bucket-region;
 
     proxy_cache tools;
     proxy_cache_key $uri;
@@ -54,9 +55,11 @@ server {
     proxy_cache_lock on;
     proxy_cache_use_stale error timeout http_500 http_502 http_503 http_504;
 
-    # Without list permission the bucket answers 403 for missing keys.
+    # Never pass the bucket's own error bodies through: S3 error XML names the
+    # bucket. Without list permission the bucket answers 403 for missing keys.
     proxy_intercept_errors on;
-    error_page 403 404 = @missing;
+    error_page 400 401 403 404 = @missing;
+    error_page 500 502 503 504 = @unavailable;
 
     location = /healthz { access_log off; return 200 "ok\n"; }
 
@@ -79,4 +82,5 @@ server {
     }
 
     location @missing { return 404 "not found\n"; }
+    location @unavailable { return 503 "temporarily unavailable, please retry\n"; }
 }
