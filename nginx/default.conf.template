@@ -81,6 +81,6 @@ server {
         add_header X-Cache $upstream_cache_status;
     }
 
-    location @missing { return 404 "not found\n"; }
-    location @unavailable { return 503 "temporarily unavailable, please retry\n"; }
+    location @missing { types { } default_type "text/plain; charset=utf-8"; return 404 "not found\n"; }
+    location @unavailable { types { } default_type "text/plain; charset=utf-8"; return 503 "temporarily unavailable, please retry\n"; }
 }

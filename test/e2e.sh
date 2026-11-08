@@ -38,7 +38,7 @@ expect_fail() { # expect_fail DESCRIPTION EXPECTED_TEXT CMD...
 	if out=$("$@" 2>&1); then fail "$desc: command succeeded"; fi
 	expect_has "$out" "$text" "$desc"
 }
-settle() { sleep 1.3; } # the proxy reuses objects for 1s in this test
+settle() { sleep 2.2; } # objects are reused for 1s, which nginx tracks in whole seconds
 
 lint() {
 	if command -v shellcheck >/dev/null 2>&1; then
@@ -112,6 +112,7 @@ root=$(curl -fsS "$PROXY/")
 expect_has "$root" '<a href="/demo/">demo</a> <span>0.1.0</span>' "root index lists demo"
 expect_eq "$(status_code "$PROXY/demo/nope")" 404 "missing file is 404 (bucket says 403)"
 expect_eq "$(status_code "$PROXY/nope/")" 404 "unknown tool is 404"
+expect_eq "$(header "$PROXY/nope/" content-type)" "text/plain; charset=utf-8" "404s are plain text"
 expect_lacks "$(curl -s -D - "$PROXY/demo/nope")" "$TOOLS_S3_BUCKET" "a 404 does not reveal the bucket"
 expect_lacks "$(curl -s -D - "$PROXY/demo/install.sh")" "$TOOLS_S3_BUCKET" "normal responses do not reveal the bucket"
 expect_eq "$(status_code -X POST "$PROXY/demo/install.sh")" 405 "writes are rejected"
