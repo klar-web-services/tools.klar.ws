@@ -16,3 +16,66 @@ jobs:
         run: shellcheck bin/toolsctl test/e2e.sh
       - name: End-to-end test (local S3 + nginx)
         run: test/e2e.sh
+
+  # Runs publish/action.yml exactly as tool repositories call it, against the
+  # local S3 stand-in, then installs through the proxy.
+  action:
+    runs-on: ubuntu-latest
+    env:
+      TOOLS_S3_ENDPOINT: http://127.0.0.1:39000
+      TOOLS_S3_REGION: us-east-1
+      TOOLS_PUBLIC_URL: http://127.0.0.1:38080
+      AWS_ACCESS_KEY_ID: e2e-access
+      AWS_SECRET_ACCESS_KEY: e2e-secret-key
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+      - name: Start local S3 and proxy
+        run: |
+          docker compose -f test/compose.yml up -d --quiet-pull s3 proxy
+          for _ in $(seq 60); do
+            aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api list-buckets >/dev/null 2>&1 && break
+            sleep 1
+          done
+          aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api create-bucket --bucket tools-test
+          TOOLS_S3_BUCKET=tools-test bin/toolsctl apply-policy
+      - name: Build a fake release
+        run: |
+          mkdir -p build dist
+          printf '#!/bin/sh\necho "demo 1.0.0"\n' > build/demo
+          chmod +x build/demo
+          tar -czf dist/demo-x86_64-unknown-linux-gnu.tar.gz -C build demo
+          (cd dist && sha256sum -- * > checksums.txt)
+      - name: Publish through the action
+        uses: ./publish
+        with:
+          tool: demo
+          version: v1.0.0
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          description: Published by the action test
+          bucket: tools-test
+          access-key-id: e2e-access
+          secret-access-key: e2e-secret-key
+      - name: Install from the proxy
+        run: |
+          for _ in $(seq 30); do curl -fs -o /dev/null "$TOOLS_PUBLIC_URL/healthz" && break; sleep 1; done
+          test "$(curl -fsS "$TOOLS_PUBLIC_URL/demo/latest")" = "1.0.0"
+          curl -fsSL "$TOOLS_PUBLIC_URL/demo/install.sh" | DEMO_INSTALL_DIR="$RUNNER_TEMP/bin" sh
+          test "$("$RUNNER_TEMP/bin/demo")" = "demo 1.0.0"
+          curl -fsS "$TOOLS_PUBLIC_URL/demo/" | grep -q 'Published by the action test'
+          curl -fsS "$TOOLS_PUBLIC_URL/demo/" | grep -q "href=\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\""
+      - name: A glob that matches nothing fails the action
+        id: nomatch
+        continue-on-error: true
+        uses: ./publish
+        with:
+          tool: demo
+          version: v1.0.1
+          files: dist/*.nope
+          bucket: tools-test
+          access-key-id: e2e-access
+          secret-access-key: e2e-secret-key
+      - name: Check that it failed
+        run: test "${{ steps.nomatch.outcome }}" = failure
