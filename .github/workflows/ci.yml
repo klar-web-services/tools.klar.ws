@@ -11,7 +11,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck bin/toolsctl test/e2e.sh
       - name: End-to-end test (local S3 + nginx)
@@ -29,7 +29,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: e2e-secret-key
       AWS_DEFAULT_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Start local S3 and proxy
         run: |
           docker compose -f test/compose.yml up -d --quiet-pull s3 proxy

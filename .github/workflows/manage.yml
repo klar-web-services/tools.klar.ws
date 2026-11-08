@@ -44,7 +44,7 @@ jobs:
   manage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: ${{ inputs.command }} ${{ inputs.tool }}
         env:
           TOOLS_S3_BUCKET: ${{ secrets.TOOLS_S3_BUCKET }}
