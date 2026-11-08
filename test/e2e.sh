@@ -169,6 +169,8 @@ f="$PROXY/demo/v0.2.0/checksums.txt"
 curl -fsS -o /dev/null "$f"
 expect_eq "$(header "$f" x-cache)" HIT "second request is served from the cache"
 "${COMPOSE[@]}" stop s3 >/dev/null 2>&1
+down=$("${COMPOSE[@]}" ps -q s3-down)
+docker network connect --alias s3 toolsctl-e2e_default "$down"
 settle
 resp=$(curl -s -D - -o /dev/null "$f" | tr -d '\r')
 expect_has "$resp" "HTTP/1.1 200" "cached file still downloads while the bucket is down"
@@ -176,6 +178,7 @@ expect_has "$resp" "X-Cache: STALE" "... served as stale"
 resp=$(curl -s -D - "$PROXY/demo/v0.2.0/demo-aarch64-apple-darwin.tar.gz" | tr -d '\r')
 expect_has "$resp" "HTTP/1.1 503" "uncached file during the outage is a plain 503"
 expect_lacks "$resp" "$TOOLS_S3_BUCKET" "... that does not reveal the bucket"
+docker network disconnect toolsctl-e2e_default "$down"
 "${COMPOSE[@]}" start s3 >/dev/null 2>&1
 for _ in $(seq 30); do aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api head-bucket --bucket tools-test >/dev/null 2>&1 && break; sleep 1; done
 "${COMPOSE[@]}" restart proxy >/dev/null 2>&1
