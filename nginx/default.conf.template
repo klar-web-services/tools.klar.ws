@@ -2,7 +2,7 @@
 # Rendered by the nginx image's entrypoint (envsubst); only ${S3_*} and
 # ${NGINX_LOCAL_RESOLVERS} are substituted (NGINX_ENVSUBST_FILTER).
 #   S3_ORIGIN       bucket URL without trailing slash, virtual-host or path style:
-#                   https://<bucket>.fsn1.your-objectstorage.com | http://s3:9000/<bucket>
+#                   https://<bucket>.<s3-endpoint-host> | http://s3:9000/<bucket>
 #   S3_CACHE_VALID  how long a fetched object is reused before re-checking, e.g. 1m
 
 # Small cache, mainly so downloads keep working through short bucket outages.

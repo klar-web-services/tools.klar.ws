@@ -1,4 +1,4 @@
-# Local stand-in for production: RustFS plays the Hetzner bucket, nginx runs the
+# Local stand-in for production: RustFS plays the S3 bucket, nginx runs the
 # real proxy config. Used by test/e2e.sh.
 name: toolsctl-e2e
 services:
@@ -28,8 +28,8 @@ services:
 
   # Stand-in for a bucket outage: answers 503 to everything. During the outage
   # test it takes over the name "s3" on the default network while the real s3
-  # container is stopped, so DNS keeps working, as it does when Hetzner has
-  # trouble. Until then it sits on a network of its own.
+  # container is stopped, so DNS keeps working, as it does when the storage
+  # provider has trouble. Until then it sits on a network of its own.
   s3-down:
     image: nginx:1.30.6-alpine-slim@sha256:f65ed258206d1eb6c4eb6141111715a2cf94ac0a4ec9675fc2da186f7aadb163
     command: ["sh", "-c", "echo 'server { listen 9000; return 503; }' > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
