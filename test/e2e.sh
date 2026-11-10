@@ -81,7 +81,7 @@ install_sh() { # install_sh DIR [VAR=VALUE...]: run the published installer like
 
 # ---------------------------------------------------------------------------------
 step "start local S3 and proxy"
-"${COMPOSE[@]}" up -d --quiet-pull
+"${COMPOSE[@]}" up -d --quiet-pull --build
 for _ in $(seq 60); do
 	aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api list-buckets >/dev/null 2>&1 && break
 	sleep 1
@@ -90,6 +90,8 @@ aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api create-bucket --bucket tools-test 
 toolsctl apply-policy
 for _ in $(seq 30); do [ "$(status_code "$PROXY/healthz")" = 200 ] && break; sleep 1; done
 expect_eq "$(status_code "$PROXY/healthz")" 200 "proxy is up"
+if out=$(timeout 30 docker run --rm tools-proxy:e2e 2>&1); then fail "the proxy started without S3_ORIGIN"; fi
+expect_has "$out" "set S3_ORIGIN" "the proxy refuses to start without S3_ORIGIN"
 expect_eq "$(status_code "$TOOLS_S3_ENDPOINT/tools-test/")" 403 "anonymous users cannot list the bucket"
 
 step "publish demo 0.1.0 with generated installers"

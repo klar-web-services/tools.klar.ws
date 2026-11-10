@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: shellcheck
-        run: shellcheck bin/toolsctl test/e2e.sh
+        run: shellcheck bin/toolsctl test/e2e.sh nginx/05-tools-proxy.sh
       - name: End-to-end test (local S3 + nginx)
         run: test/e2e.sh
 
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Start local S3 and proxy
         run: |
-          docker compose -f test/compose.yml up -d --quiet-pull s3 proxy
+          docker compose -f test/compose.yml up -d --quiet-pull --build s3 proxy
           for _ in $(seq 60); do
             aws --endpoint-url "$TOOLS_S3_ENDPOINT" s3api list-buckets >/dev/null 2>&1 && break
             sleep 1
@@ -79,3 +79,51 @@ jobs:
           secret-access-key: e2e-secret-key
       - name: Check that it failed
         run: test "${{ steps.nomatch.outcome }}" = failure
+
+  # Ships the proxy image once everything above passed on main. Dokploy deploys
+  # :latest whenever GHCR reports a new one (repository webhook, registry
+  # package events), so a red run never reaches production.
+  deploy:
+    needs: [test, action]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: deploy
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Push the image if the proxy changed
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # The revision :latest was built from, empty before the first push.
+          live=$(docker pull -q "$IMAGE:latest" >/dev/null 2>&1 &&
+            docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE:latest" || true)
+          # Compared with what is live, not with the previous push, so a proxy
+          # change from a red commit still ships with the next green one.
+          if [ -n "$live" ] && git diff --quiet "$live" "$GITHUB_SHA" -- Dockerfile .dockerignore nginx/ 2>/dev/null; then
+            echo "::notice::The proxy is unchanged since $live; nothing to deploy."
+            exit 0
+          fi
+          # An older run finishing late must not roll production back.
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on; its run deploys."
+            exit 0
+          fi
+          # One plain manifest per push: no attestations, which GHCR would
+          # report as untagged versions.
+          docker build --provenance=false --sbom=false \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$IMAGE:latest" -t "$IMAGE:sha-$GITHUB_SHA" .
+          # :latest first: its push creates the new package version that
+          # Dokploy deploys. The commit tag is for rolling back.
+          docker push -q "$IMAGE:latest"
+          docker push -q "$IMAGE:sha-$GITHUB_SHA"
+          echo "::notice::Pushed $IMAGE:sha-$GITHUB_SHA as :latest."

@@ -1,5 +1,5 @@
-# Local stand-in for production: RustFS plays the S3 bucket, nginx runs the
-# real proxy config. Used by test/e2e.sh.
+# Local stand-in for production: RustFS plays the S3 bucket, the proxy is the
+# image CI ships (../Dockerfile). Used by test/e2e.sh.
 name: toolsctl-e2e
 services:
   s3:
@@ -11,16 +11,11 @@ services:
       - "127.0.0.1:${E2E_S3_PORT:-39000}:9000"
 
   proxy:
-    image: nginx:1.30.6-alpine-slim@sha256:f65ed258206d1eb6c4eb6141111715a2cf94ac0a4ec9675fc2da186f7aadb163
+    build: ..
+    image: tools-proxy:e2e
     environment:
       S3_ORIGIN: http://s3:9000/tools-test
       S3_CACHE_VALID: 1s
-      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
-      NGINX_ENVSUBST_FILTER: "^(S3_|NGINX_LOCAL_RESOLVERS$$)"
-    volumes:
-      - ../nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
-    tmpfs:
-      - /var/cache/nginx/tools:size=64m
     ports:
       - "127.0.0.1:${E2E_PROXY_PORT:-38080}:80"
     depends_on:
