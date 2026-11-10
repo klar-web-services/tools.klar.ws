@@ -6,7 +6,7 @@
 #   S3_CACHE_VALID  how long a fetched object is reused before re-checking, e.g. 1m
 
 # Small cache, mainly so downloads keep working through short bucket outages.
-# It lives on a tmpfs (see docker-compose.yml), so a restart empties it.
+# 05-tools-proxy.sh empties it whenever the container starts.
 proxy_cache_path /var/cache/nginx/tools levels=1:2 keys_zone=tools:10m max_size=200m
                  inactive=7d use_temp_path=off;
 
