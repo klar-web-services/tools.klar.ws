@@ -100,6 +100,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Push the image if the proxy changed
+        id: shearbolt-build
         run: |
           set -euo pipefail
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -121,7 +122,18 @@ jobs:
           # report as untagged versions.
           docker build --provenance=false --sbom=false \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            -t "$IMAGE:latest" -t "$IMAGE:sha-$GITHUB_SHA" .
+            -t "$IMAGE:latest" -t "$IMAGE:shearbolt-${{ github.sha }}" -t "$IMAGE:sha-$GITHUB_SHA" .
+          echo shearbolt-image="$IMAGE:shearbolt-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo shearbolt-reached=true >> "$GITHUB_OUTPUT"
+      - name: shearbolt
+        if: steps.shearbolt-build.outputs.shearbolt-reached != ''
+        uses: klar-web-services/shearbolt@v1
+        env:
+          SHEARBOLT_IMAGE: ${{ steps.shearbolt-build.outputs.shearbolt-image }}
+      - name: Push the image if the proxy changed (continued)
+        if: steps.shearbolt-build.outputs.shearbolt-reached != ''
+        run: |
+          set -euo pipefail
           # :latest first: its push creates the new package version that
           # Dokploy deploys. The commit tag is for rolling back.
           docker push -q "$IMAGE:latest"

@@ -3,6 +3,10 @@
 # https://<bucket>.<s3-endpoint-host>
 FROM nginx:1.30.6-alpine-slim@sha256:f65ed258206d1eb6c4eb6141111715a2cf94ac0a4ec9675fc2da186f7aadb163
 
+# The base image's zlib 1.3.2-r1 has CVE-2026-4738 (fixed in 1.4-r0). Drop
+# this once the nginx image ships the fix.
+RUN apk upgrade --no-cache zlib
+
 ENV S3_CACHE_VALID=1m \
     NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
     NGINX_ENVSUBST_FILTER='^(S3_|NGINX_LOCAL_RESOLVERS$)'
